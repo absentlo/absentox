@@ -1,0 +1,3 @@
+[submodule "native/dpf"]
+	path = native/dpf
+	url = https://github.com/DISTRHO/DPF.git

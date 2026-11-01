@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Renders absentox through REAPER and checks the audio. Run: python3 tests/smoke.py
-Needs REAPER on PATH and a display. Uses a throwaway config, not your REAPER settings."""
+"""Checks the audio of both versions of ABSENToX.
+  python3 tests/smoke.py          the JSFX version, rendered through REAPER
+  python3 tests/smoke.py native   the C++ engine, plus a comparison against the JSFX version
+REAPER needs to be on PATH with a display. It uses a throwaway config, not your REAPER settings."""
 import atexit, cmath, math, os, re, shutil, struct, subprocess, sys, tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SLIDERS = 38
+NATIVE = len(sys.argv) > 1 and sys.argv[1] == "native"
+RENDER_BIN = None
 WAVE, DETUNE, SUB, NOISE, WOW_DEPTH = 1, 2, 3, 4, 6
 CUTOFF, RESO, FENV, ATK, REL = 7, 8, 9, 10, 13
 DRIVE, CH_MIX, DL_FB, DL_MIX = 14, 16, 18, 19
@@ -78,14 +82,23 @@ def project(path, out, params, notes, seconds, rate, switch=None):
 """)
 
 
-def render(tmp, name, params, notes, seconds, rate=44100, switch=None):
+def render(tmp, name, params, notes, seconds, rate=44100, switch=None, native=None):
+    native = NATIVE if native is None else native
     rpp, out = os.path.join(tmp, name + ".rpp"), os.path.join(tmp, name + ".wav")
-    project(rpp, out, params, notes, seconds, rate, switch)
-    subprocess.run(
-        ["reaper", "-cfgfile", os.path.join(tmp, "cfg", "reaper.ini"), "-newinst", "-nosplash",
-         "-ignoreerrors", "-renderproject", rpp],
-        timeout=180, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    if native:
+        subprocess.run([
+            RENDER_BIN, out, str(seconds), str(rate),
+            ",".join(f"{k}={v}" for k, v in params.items()),
+            ",".join(f"{s}:{l}:{n}" for s, l, n in notes),
+            f"{switch[0]}|" + ",".join(f"{at}={v}" for at, v in switch[1]) if switch else "",
+        ], check=True, timeout=120)
+    else:
+        project(rpp, out, params, notes, seconds, rate, switch)
+        subprocess.run(
+            ["reaper", "-cfgfile", os.path.join(tmp, "cfg", "reaper.ini"), "-newinst", "-nosplash",
+             "-ignoreerrors", "-renderproject", rpp],
+            timeout=180, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
     if not os.path.exists(out):
         sys.exit(f"FAIL {name}: REAPER produced no file")
     # the wave module cannot read float WAVs, and float is what shows overs past 1.0
@@ -129,6 +142,21 @@ def main():
     shutil.copy(os.path.join(ROOT, "absentox.jsfx"), os.path.join(tmp, "cfg", "Effects"))
     open(os.path.join(tmp, "cfg", "reaper.ini"), "w").close()
     good = True
+
+    if NATIVE:
+        global RENDER_BIN
+        RENDER_BIN = os.path.join(tmp, "render")
+        subprocess.run(["g++", "-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror", "-o", RENDER_BIN,
+                        os.path.join(ROOT, "tests", "render.cpp")], check=True)
+        # the two versions must agree on every control
+        src = open(os.path.join(ROOT, "absentox.jsfx")).read()
+        jsfx = re.findall(r"^slider(\d+):\w+=(-?[\d.]+)<(-?[\d.]+),(-?[\d.]+)", src, re.M)
+        cpp = subprocess.run([RENDER_BIN, "--params"], check=True, capture_output=True, text=True).stdout.split("\n")
+        same = len(jsfx) == SLIDERS and all(
+            all(abs(float(x) - float(y)) < 1e-4 for x, y in zip(cpp[i].split()[1:], (lo, hi, df)))
+            for i, (_, df, lo, hi) in enumerate(jsfx)
+        )
+        good &= check(same, "native controls match the JSFX ranges and defaults")
 
     # defaults: a chord makes stereo sound and stays under the ceiling
     l, r, sr = render(tmp, "default", {}, [(0, 4, 48), (0, 4, 55), (0, 4, 64)], 8)
@@ -203,6 +231,21 @@ def main():
     step = lambda x: max(abs(x[i + 1] - x[i]) for i in range(len(x) - 1))
     before, around = step(l[int(0.6 * sr):int(0.9 * sr)]), step(l[int(0.98 * sr):int(1.03 * sr)])
     good &= check(around < 3 * before, f"toggling mid-note does not click (step {before:.4f} -> {around:.4f})")
+
+    if NATIVE:
+        # phases start at random, so compare levels over time rather than samples
+        patches = {
+            "default": ({}, chord),
+            "dry": ({**FX_OFF, DETUNE: 0, CUTOFF: 18000, FENV: 0}, [(0, 4, 57)]),
+            "full": ({WAVE: 0.5, DRIVE: 0.8, DL_MIX: 0.5, RV_SHIM: 1, EQ_LOW: 6}, chord),
+        }
+        for name, (params, notes) in patches.items():
+            a, _, sr = render(tmp, "cmpn" + name, params, notes, 4, native=True)
+            b, _, _ = render(tmp, "cmpj" + name, params, notes, 4, native=False)
+            # short windows swing by over 25% between two runs of the same version, so use the whole note
+            x, y = rms(a[:4 * sr]), rms(b[:4 * sr])
+            diff = abs(x - y) / y
+            good &= check(diff < 0.15, f"native sounds as loud as JSFX, patch {name} ({x:.3f} vs {y:.3f}, {diff * 100:.1f}%)")
 
     print("PASS" if good else "FAILED")
     sys.exit(0 if good else 1)
