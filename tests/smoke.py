@@ -47,7 +47,7 @@ def project(path, out, params, notes, seconds, rate, switch=None):
   RENDER_RESAMPLE 3 0 1
   RENDER_STEMS 0
   RENDER_DITHER 0
-  SAMPLERATE {rate} 0 0
+  SAMPLERATE {rate} 1 0
   <RENDER_CFG
     ZXZhdyABAA==
   >
