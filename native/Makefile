@@ -11,9 +11,6 @@ FILES_UI = AbsentoxUI.cpp
 
 include dpf/Makefile.plugins.mk
 
-all: dgl vst3 clap
+all: vst3 clap
 
-dgl:
-	$(MAKE) -C dpf/dgl opengl
-
-.PHONY: all dgl
+.PHONY: all
